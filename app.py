@@ -1,7 +1,11 @@
+import json
+import os
 import re
 import time
+import urllib.error
+import urllib.request
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import streamlit as st
 
@@ -134,7 +138,19 @@ VIEWING_SLOTS = [
     "Friday 15:45",
 ]
 
+WEEKDAY_INDEX = {
+    "Monday": 0,
+    "Tuesday": 1,
+    "Wednesday": 2,
+    "Thursday": 3,
+    "Friday": 4,
+    "Saturday": 5,
+    "Sunday": 6,
+}
+
 INITIAL_PROFILE = {
+    "name": None,
+    "phone": None,
     "budget": None,
     "location": None,
     "timeline": None,
@@ -191,6 +207,18 @@ def init_state() -> None:
         st.session_state.asked_fields = []
     if "pending_reply" not in st.session_state:
         st.session_state.pending_reply = None
+    if "webhook_status" not in st.session_state:
+        st.session_state.webhook_status = "Not sent"
+    if "last_sent_fingerprint" not in st.session_state:
+        st.session_state.last_sent_fingerprint = None
+    if "notification_status" not in st.session_state:
+        st.session_state.notification_status = "Not sent"
+    if "last_notification_fingerprint" not in st.session_state:
+        st.session_state.last_notification_fingerprint = None
+    if "follow_up_status" not in st.session_state:
+        st.session_state.follow_up_status = "Not sent"
+    if "last_follow_up_fingerprint" not in st.session_state:
+        st.session_state.last_follow_up_fingerprint = None
 
 
 def inject_styles() -> None:
@@ -420,24 +448,67 @@ def current_time_label() -> str:
     return datetime.now().strftime("%H:%M")
 
 
+def next_slot_datetime(slot_label: str) -> datetime:
+    day_name, hour_text = slot_label.split()
+    target_weekday = WEEKDAY_INDEX[day_name]
+    hour, minute = map(int, hour_text.split(":"))
+    now = datetime.now()
+    days_ahead = (target_weekday - now.weekday()) % 7
+    candidate = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def slot_display_label(slot_label: str) -> str:
+    slot_dt = next_slot_datetime(slot_label)
+    return f"{slot_label} ({slot_dt.strftime('%d %b %Y')})"
+
+
 def parse_preferences(message: str) -> list[str]:
     profile = st.session_state.lead_profile
     normalized = message.lower()
     updated_fields = []
 
+    phone_match = re.search(r"(\+?\d[\d\s\-]{7,}\d)", message)
+    if phone_match:
+        phone = re.sub(r"\s+", " ", phone_match.group(1)).strip()
+        if profile["phone"] != phone:
+            profile["phone"] = phone
+            updated_fields.append("phone")
+
+    name_patterns = [
+        r"\bmy name is\s+([A-Za-z][A-Za-z\s'-]{1,40})",
+        r"\bi am\s+([A-Za-z][A-Za-z\s'-]{1,40})",
+        r"\bi'm\s+([A-Za-z][A-Za-z\s'-]{1,40})",
+        r"\bthis is\s+([A-Za-z][A-Za-z\s'-]{1,40})",
+    ]
+    for pattern in name_patterns:
+        name_match = re.search(pattern, message, re.IGNORECASE)
+        if name_match:
+            candidate = name_match.group(1).strip(" .,!?:;")
+            candidate_words = candidate.split()
+            if 1 <= len(candidate_words) <= 4 and not any(char.isdigit() for char in candidate):
+                name = " ".join(word.capitalize() for word in candidate_words)
+                if profile["name"] != name:
+                    profile["name"] = name
+                    updated_fields.append("name")
+                break
+
     budget_match = re.search(r"(?:eur)?\s?(\d+(?:[\.,]\d+)?)\s?(k|m|million)?", normalized)
     if budget_match:
         raw = float(budget_match.group(1).replace(",", "."))
         suffix = budget_match.group(2)
+        has_currency_cue = "eur" in normalized or suffix is not None
         if suffix in {"m", "million"}:
             budget = round(raw * 1_000_000)
         elif suffix == "k":
             budget = round(raw * 1_000)
-        elif raw < 10:
-            budget = round(raw * 100_000)
-        else:
+        elif has_currency_cue or raw >= 50000:
             budget = round(raw)
-        if budget >= 50_000:
+        else:
+            budget = None
+        if budget and budget >= 50_000:
             if profile["budget"] != budget:
                 profile["budget"] = budget
                 updated_fields.append("budget")
@@ -551,7 +622,7 @@ def get_recommendations(prefer_fresh: bool = True) -> list[dict]:
 def profile_strength() -> int:
     profile = st.session_state.lead_profile
     score = 0
-    for field in ["budget", "location", "bedrooms", "purpose", "timeline", "intent"]:
+    for field in ["name", "phone", "budget", "location", "bedrooms", "purpose", "timeline", "intent"]:
         if profile.get(field):
             score += 1
     return score
@@ -591,6 +662,14 @@ def get_next_question() -> tuple[str | None, str | None]:
     profile = st.session_state.lead_profile
     candidates = [
         (
+            "name",
+            "Before we go further, what name should I put on your inquiry?",
+        ),
+        (
+            "phone",
+            "What is the best phone number for viewing confirmation and follow-up?",
+        ),
+        (
             "budget",
             "What budget range would you like me to stay within?",
         ),
@@ -625,6 +704,10 @@ def summarize_updates(updated_fields: list[str]) -> str:
     profile = st.session_state.lead_profile
     labels = []
     for field in updated_fields:
+        if field == "name" and profile["name"]:
+            labels.append(f"your name as {profile['name']}")
+        elif field == "phone" and profile["phone"]:
+            labels.append(f"your phone number as {profile['phone']}")
         if field == "budget" and profile["budget"]:
             labels.append(f"budget around EUR{profile['budget']:,}")
         elif field == "location" and profile["location"]:
@@ -648,9 +731,9 @@ def summarize_updates(updated_fields: list[str]) -> str:
 def should_offer_booking() -> bool:
     profile = st.session_state.lead_profile
     populated = sum(
-        1 for key in ["budget", "location", "timeline", "bedrooms", "purpose", "intent"] if profile.get(key)
+        1 for key in ["name", "phone", "budget", "location", "timeline", "bedrooms", "purpose", "intent"] if profile.get(key)
     )
-    return populated >= 3
+    return populated >= 5
 
 
 def next_phrase(kind: str, options: list[str]) -> str:
@@ -698,6 +781,340 @@ def build_qualifying_reply(acknowledgment: str = "") -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def build_lead_json() -> dict:
+    profile = st.session_state.lead_profile
+    viewing_dt = next_slot_datetime(profile["viewing_booked"]).isoformat() if profile["viewing_booked"] else None
+    return {
+        "lead": {
+            "name": profile["name"],
+            "phone_number": profile["phone"],
+            "budget": profile["budget"],
+            "preferred_location": profile["location"],
+            "timeline": profile["timeline"],
+        },
+        "meta": {
+            "purpose": profile["purpose"],
+            "intent": profile["intent"],
+            "bedrooms": profile["bedrooms"],
+            "selected_listing": profile["selected_listing"],
+            "viewing_booked": profile["viewing_booked"],
+            "viewing_datetime": viewing_dt,
+            "captured_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    }
+
+
+def build_calendar_ics() -> str | None:
+    profile = st.session_state.lead_profile
+    if not profile["viewing_booked"]:
+        return None
+
+    start_dt = next_slot_datetime(profile["viewing_booked"])
+    end_dt = start_dt + timedelta(minutes=45)
+    lead_name = profile["name"] or "Prospective buyer"
+    listing_name = profile["selected_listing"] or "M.Residence property viewing"
+    phone = profile["phone"] or "Not provided"
+    location = profile["location"] or "Cyprus"
+    uid = f"mresidence-{start_dt.strftime('%Y%m%dT%H%M%S')}-{phone.replace(' ', '').replace('+', '')}@mresidence.demo"
+    created = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    start_utc = start_dt.strftime("%Y%m%dT%H%M%S")
+    end_utc = end_dt.strftime("%Y%m%dT%H%M%S")
+    description = (
+        f"Viewing arranged by M.Residence for {lead_name}.\\n"
+        f"Property: {listing_name}\\n"
+        f"Phone: {phone}\\n"
+        f"Preferred area: {location}"
+    )
+
+    return "\n".join(
+        [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//M.Residence//AI Concierge//EN",
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{created}",
+            f"DTSTART:{start_utc}",
+            f"DTEND:{end_utc}",
+            f"SUMMARY:M.Residence Viewing - {listing_name}",
+            f"DESCRIPTION:{description}",
+            f"LOCATION:{location}, Cyprus",
+            "END:VEVENT",
+            "END:VCALENDAR",
+        ]
+    )
+
+
+def confirm_viewing_slot(slot_label: str, source: str = "booking widget") -> None:
+    profile = st.session_state.lead_profile
+    profile["viewing_booked"] = slot_label
+    if not profile["selected_listing"]:
+        shortlist = get_recommendations(prefer_fresh=False)
+        if shortlist:
+            profile["selected_listing"] = shortlist[0]["title"]
+
+    confirmation = (
+        f"Perfect, I have reserved **{slot_display_label(slot_label)}** for your viewing.\n\n"
+        f"I have linked it to **{profile['selected_listing'] or 'your shortlisted property'}** and prepared the calendar event for download."
+    )
+    st.session_state.messages.append({"role": "assistant", "content": confirmation, "time": current_time_label()})
+    maybe_send_lead_to_webhook()
+
+
+def get_webhook_url() -> str | None:
+    try:
+        secrets_url = st.secrets.get("lead_webhook_url")
+        if secrets_url:
+            return secrets_url
+    except Exception:
+        pass
+    return os.getenv("LEAD_WEBHOOK_URL")
+
+
+def get_notification_webhook_url() -> str | None:
+    try:
+        secrets_url = st.secrets.get("agent_notification_webhook_url")
+        if secrets_url:
+            return secrets_url
+    except Exception:
+        pass
+    return os.getenv("AGENT_NOTIFICATION_WEBHOOK_URL")
+
+
+def lead_ready_for_webhook() -> bool:
+    profile = st.session_state.lead_profile
+    required = ["name", "phone", "budget", "location", "timeline"]
+    has_required = all(profile.get(field) for field in required)
+    strong_interest = bool(profile.get("viewing_booked") or profile.get("selected_listing"))
+    return has_required and strong_interest
+
+
+def lead_fingerprint(payload: dict) -> str:
+    lead = payload["lead"]
+    meta = payload["meta"]
+    return "|".join(
+        [
+            str(lead.get("name")),
+            str(lead.get("phone_number")),
+            str(lead.get("budget")),
+            str(lead.get("preferred_location")),
+            str(lead.get("timeline")),
+            str(meta.get("selected_listing")),
+            str(meta.get("viewing_booked")),
+        ]
+    )
+
+
+def build_notification_payload() -> dict:
+    lead_payload = build_lead_json()
+    profile = st.session_state.lead_profile
+    return {
+        "type": "new_real_estate_lead",
+        "agency": "M.Residence",
+        "message": (
+            f"New lead from {profile['name'] or 'unknown lead'} | "
+            f"Phone: {profile['phone'] or 'not provided'} | "
+            f"Budget: {('EUR' + format(profile['budget'], ',')) if profile['budget'] else 'not provided'} | "
+            f"Location: {profile['location'] or 'not provided'} | "
+            f"Timeline: {profile['timeline'] or 'not provided'}"
+        ),
+        "lead_json": lead_payload,
+    }
+
+
+def get_best_matches_for_follow_up() -> list[dict]:
+    return get_recommendations(prefer_fresh=False)
+
+
+def build_follow_up_schedule() -> list[dict]:
+    profile = st.session_state.lead_profile
+    lead_name = profile["name"] or "there"
+    budget_text = f"around EUR{profile['budget']:,}" if profile["budget"] else "within your target budget"
+    location_text = profile["location"] or "your preferred area"
+    timeline_text = profile["timeline"] or "your timeframe"
+    best_matches = get_best_matches_for_follow_up()
+    top_listing = best_matches[0]["title"] if best_matches else "the shortlisted property"
+    alternatives = ", ".join(listing["title"] for listing in best_matches[1:3]) if len(best_matches) > 1 else "a couple of comparable homes"
+    created_at = datetime.now()
+
+    return [
+        {
+            "day": 1,
+            "scheduled_for": (created_at + timedelta(days=1)).isoformat(timespec="seconds"),
+            "channel": "email_or_message",
+            "message": (
+                f"Hi {lead_name}, this is M.Residence checking in on your interest in {top_listing}. "
+                f"Would you like me to keep searching in {location_text} with a budget {budget_text}, "
+                f"or would you prefer to move toward arranging a viewing?"
+            ),
+        },
+        {
+            "day": 3,
+            "scheduled_for": (created_at + timedelta(days=3)).isoformat(timespec="seconds"),
+            "channel": "email_or_message",
+            "message": (
+                f"Hi {lead_name}, I have pulled together a few similar options that may suit your plans for {timeline_text}. "
+                f"Alongside {top_listing}, I would suggest looking at {alternatives}. "
+                "If you want, I can send a tighter comparison and recommended next step."
+            ),
+        },
+        {
+            "day": 7,
+            "scheduled_for": (created_at + timedelta(days=7)).isoformat(timespec="seconds"),
+            "channel": "email_or_message",
+            "message": (
+                f"Hi {lead_name}, I wanted to re-engage with a fresh set of options in {location_text}. "
+                f"I still have your brief saved with a budget {budget_text}, and I can send updated recommendations or arrange a new viewing slot if the timing now works better for you."
+            ),
+        },
+    ]
+
+
+def build_follow_up_payload() -> dict:
+    return {
+        "type": "lead_follow_up_schedule",
+        "agency": "M.Residence",
+        "lead_json": build_lead_json(),
+        "follow_ups": build_follow_up_schedule(),
+    }
+
+
+def send_follow_up_plan(force: bool = False) -> tuple[bool, str]:
+    notification_url = get_notification_webhook_url()
+    if not notification_url:
+        message = "Notification webhook not configured"
+        st.session_state.follow_up_status = message
+        return False, message
+
+    payload = build_follow_up_payload()
+    fingerprint = lead_fingerprint(payload["lead_json"]) + "|follow-up"
+
+    if not force and st.session_state.last_follow_up_fingerprint == fingerprint:
+        message = "Follow-up plan already sent"
+        st.session_state.follow_up_status = message
+        return True, message
+
+    request = urllib.request.Request(
+        notification_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            status_code = response.getcode()
+        if 200 <= status_code < 300:
+            st.session_state.last_follow_up_fingerprint = fingerprint
+            message = f"Follow-up plan sent ({status_code})"
+            st.session_state.follow_up_status = message
+            return True, message
+        message = f"Follow-up webhook returned status {status_code}"
+        st.session_state.follow_up_status = message
+        return False, message
+    except urllib.error.HTTPError as error:
+        message = f"Follow-up error {error.code}"
+        st.session_state.follow_up_status = message
+        return False, message
+    except Exception as error:
+        message = f"Follow-up failed: {error}"
+        st.session_state.follow_up_status = message
+        return False, message
+
+
+def send_agent_notification(force: bool = False) -> tuple[bool, str]:
+    notification_url = get_notification_webhook_url()
+    if not notification_url:
+        message = "Notification webhook not configured"
+        st.session_state.notification_status = message
+        return False, message
+
+    payload = build_notification_payload()
+    fingerprint = lead_fingerprint(payload["lead_json"])
+
+    if not force and st.session_state.last_notification_fingerprint == fingerprint:
+        message = "Notification already sent"
+        st.session_state.notification_status = message
+        return True, message
+
+    request = urllib.request.Request(
+        notification_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            status_code = response.getcode()
+        if 200 <= status_code < 300:
+            st.session_state.last_notification_fingerprint = fingerprint
+            message = f"Notification sent ({status_code})"
+            st.session_state.notification_status = message
+            return True, message
+        message = f"Notification webhook returned status {status_code}"
+        st.session_state.notification_status = message
+        return False, message
+    except urllib.error.HTTPError as error:
+        message = f"Notification error {error.code}"
+        st.session_state.notification_status = message
+        return False, message
+    except Exception as error:
+        message = f"Notification failed: {error}"
+        st.session_state.notification_status = message
+        return False, message
+
+
+def send_lead_to_webhook(force: bool = False) -> tuple[bool, str]:
+    webhook_url = get_webhook_url()
+    if not webhook_url:
+        message = "Webhook URL not configured"
+        st.session_state.webhook_status = message
+        return False, message
+
+    payload = build_lead_json()
+    fingerprint = lead_fingerprint(payload)
+
+    if not force and st.session_state.last_sent_fingerprint == fingerprint:
+        message = "Lead already sent"
+        st.session_state.webhook_status = message
+        return True, message
+
+    request = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            status_code = response.getcode()
+        if 200 <= status_code < 300:
+            st.session_state.last_sent_fingerprint = fingerprint
+            message = f"Sent to webhook ({status_code})"
+            st.session_state.webhook_status = message
+            return True, message
+        message = f"Webhook returned status {status_code}"
+        st.session_state.webhook_status = message
+        return False, message
+    except urllib.error.HTTPError as error:
+        message = f"Webhook error {error.code}"
+        st.session_state.webhook_status = message
+        return False, message
+    except Exception as error:
+        message = f"Webhook failed: {error}"
+        st.session_state.webhook_status = message
+        return False, message
+
+
+def maybe_send_lead_to_webhook() -> None:
+    if lead_ready_for_webhook():
+        send_lead_to_webhook()
+        send_agent_notification()
+        send_follow_up_plan()
+
+
 def generate_reply(message: str) -> str:
     profile = st.session_state.lead_profile
     normalized = message.lower()
@@ -706,10 +1123,12 @@ def generate_reply(message: str) -> str:
 
     if try_book_specific_slot(normalized):
         selected = profile["selected_listing"] or "the shortlisted property"
-        return (
+        response = (
             f"Perfect, I have penciled you in for **{profile['viewing_booked']}**.\n\n"
             f"I will note your interest in **{selected}**. Before the viewing, would you like me to suggest one or two comparable options so you can compare value on the same trip?"
         )
+        maybe_send_lead_to_webhook()
+        return response
 
     if mentions_booking(normalized):
         if profile_strength() < 3:
@@ -735,7 +1154,9 @@ def generate_reply(message: str) -> str:
             f"Here are a few viewing times available this week: **{slots}**.\n\n"
             "Reply with the time that works best and I will confirm it for you."
         ]
-        return "\n\n".join(part for part in parts if part)
+        response = "\n\n".join(part for part in parts if part)
+        maybe_send_lead_to_webhook()
+        return response
 
     if asks_for_similar(normalized) or asks_for_recommendations(normalized):
         if profile_strength() < 3:
@@ -755,7 +1176,9 @@ def generate_reply(message: str) -> str:
                 "The first option is the strongest fit, and the next two give you strong alternatives on price or location.",
                 closing,
             ]
-            return "\n\n".join(part for part in parts if part)
+            response = "\n\n".join(part for part in parts if part)
+            maybe_send_lead_to_webhook()
+            return response
         return build_fallback()
 
     if asks_about_properties(normalized) or profile["location"] or profile["budget"] or profile["bedrooms"]:
@@ -777,7 +1200,9 @@ def generate_reply(message: str) -> str:
                 f"{render_recommendations(matches)}\n\n"
                 f"{follow_up}",
             ]
-            return "\n\n".join(part for part in parts if part)
+            response = "\n\n".join(part for part in parts if part)
+            maybe_send_lead_to_webhook()
+            return response
         return build_fallback()
 
     fallback = build_fallback()
@@ -793,6 +1218,12 @@ def reset_chat() -> None:
     st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
     st.session_state.asked_fields = []
     st.session_state.pending_reply = None
+    st.session_state.webhook_status = "Not sent"
+    st.session_state.last_sent_fingerprint = None
+    st.session_state.notification_status = "Not sent"
+    st.session_state.last_notification_fingerprint = None
+    st.session_state.follow_up_status = "Not sent"
+    st.session_state.last_follow_up_fingerprint = None
 
 
 def submit_prompt(prompt: str) -> None:
@@ -879,6 +1310,8 @@ def render_featured_listings() -> None:
 
 def render_profile() -> None:
     profile = st.session_state.lead_profile
+    name = profile["name"] or "Not captured yet"
+    phone = profile["phone"] or "Not captured yet"
     budget = f"EUR{profile['budget']:,}" if profile["budget"] else "Not captured yet"
     location = profile["location"] or "Not captured yet"
     timeline = profile["timeline"] or "Not captured yet"
@@ -889,6 +1322,8 @@ def render_profile() -> None:
 
     st.markdown("<div class='profile-card'>", unsafe_allow_html=True)
     st.markdown("### Lead Snapshot")
+    st.markdown(f"**Name:** {name}")
+    st.markdown(f"**Phone:** {phone}")
     st.markdown(f"**Budget:** {budget}")
     st.markdown(f"**Location:** {location}")
     st.markdown(f"**Timeline:** {timeline}")
@@ -900,8 +1335,73 @@ def render_profile() -> None:
 
     st.markdown("<div class='profile-card'>", unsafe_allow_html=True)
     st.markdown("### Suggested viewing times")
-    slots_html = "".join(f"<span class='slot'>{slot}</span>" for slot in VIEWING_SLOTS)
+    slots_html = "".join(f"<span class='slot'>{slot_display_label(slot)}</span>" for slot in VIEWING_SLOTS)
     st.markdown(slots_html, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='profile-card'>", unsafe_allow_html=True)
+    st.markdown("### Book Viewing")
+    selected_slot = st.selectbox(
+        "Available time slots",
+        options=VIEWING_SLOTS,
+        format_func=slot_display_label,
+        key="viewing_slot_picker",
+    )
+    if st.button("Confirm viewing time", use_container_width=True):
+        confirm_viewing_slot(selected_slot)
+        st.rerun()
+
+    if profile["viewing_booked"]:
+        st.markdown(f"**Confirmed slot:** {slot_display_label(profile['viewing_booked'])}")
+        calendar_ics = build_calendar_ics()
+        if calendar_ics:
+            event_name = (profile["selected_listing"] or "m_residence_viewing").replace(" ", "_").lower()
+            st.download_button(
+                "Add calendar event (.ics)",
+                data=calendar_ics,
+                file_name=f"{event_name}.ics",
+                mime="text/calendar",
+                use_container_width=True,
+            )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    lead_json = build_lead_json()
+    follow_up_plan = build_follow_up_schedule()
+    st.markdown("<div class='profile-card'>", unsafe_allow_html=True)
+    st.markdown("### Lead JSON")
+    st.code(json.dumps(lead_json, indent=2), language="json")
+    st.download_button(
+        "Download lead JSON",
+        data=json.dumps(lead_json, indent=2),
+        file_name="m_residence_lead.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    webhook_configured = "Yes" if get_webhook_url() else "No"
+    notification_configured = "Yes" if get_notification_webhook_url() else "No"
+    st.markdown(f"**Webhook configured:** {webhook_configured}")
+    st.markdown(f"**Webhook status:** {st.session_state.webhook_status}")
+    st.markdown(f"**Notification webhook configured:** {notification_configured}")
+    st.markdown(f"**Notification status:** {st.session_state.notification_status}")
+    st.markdown(f"**Follow-up status:** {st.session_state.follow_up_status}")
+    if st.button("Send Lead To Google Sheet", use_container_width=True):
+        send_lead_to_webhook(force=True)
+        st.rerun()
+    if st.button("Send Agent Notification", use_container_width=True):
+        send_agent_notification(force=True)
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='profile-card'>", unsafe_allow_html=True)
+    st.markdown("### Automated Follow-Ups")
+    for item in follow_up_plan:
+        st.markdown(
+            f"**Day {item['day']}** | {item['scheduled_for']}\n\n{item['message']}"
+        )
+    st.code(json.dumps(build_follow_up_payload(), indent=2), language="json")
+    if st.button("Send Follow-Up Plan", use_container_width=True):
+        send_follow_up_plan(force=True)
+        st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
