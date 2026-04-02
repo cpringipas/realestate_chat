@@ -64,6 +64,50 @@ const listings = [
     priceLabel: "EUR465,000",
     blurb: "Detached home with generous indoor space and a refined suburban neighborhood profile.",
     tags: ["Detached", "Quiet area", "Parking"]
+  },
+  {
+    id: 7,
+    title: "1 bedroom apartment in City Center Nicosia",
+    type: "Apartment",
+    location: "Nicosia",
+    bedrooms: 1,
+    price: 185000,
+    priceLabel: "EUR185,000",
+    blurb: "Compact modern apartment aimed at professionals and investors who want strong city convenience.",
+    tags: ["City center", "Investment", "Modern finish"]
+  },
+  {
+    id: 8,
+    title: "3 bedroom maisonette in Dasoupoli",
+    type: "Maisonette",
+    location: "Dasoupoli",
+    bedrooms: 3,
+    price: 340000,
+    priceLabel: "EUR340,000",
+    blurb: "Smartly renovated maisonette with practical family layout and quick access to business districts.",
+    tags: ["Renovated", "Family layout", "Central access"]
+  },
+  {
+    id: 9,
+    title: "2 bedroom seafront apartment in Limassol",
+    type: "Apartment",
+    location: "Limassol",
+    bedrooms: 2,
+    price: 540000,
+    priceLabel: "EUR540,000",
+    blurb: "Seafront apartment with premium finishes and strong appeal for lifestyle buyers or holiday use.",
+    tags: ["Seafront", "Premium", "Holiday home"]
+  },
+  {
+    id: 10,
+    title: "5 bedroom villa in Germasogeia",
+    type: "Villa",
+    location: "Germasogeia",
+    bedrooms: 5,
+    price: 1450000,
+    priceLabel: "EUR1.45M",
+    blurb: "High-end hillside villa with expansive terraces, private pool, and elevated Limassol views.",
+    tags: ["Hillside", "Private pool", "Prestige"]
   }
 ];
 

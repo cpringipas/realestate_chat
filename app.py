@@ -78,6 +78,50 @@ LISTINGS = [
         "blurb": "Detached home with generous indoor space and a refined suburban neighborhood profile.",
         "tags": ["Detached", "Quiet area", "Parking"],
     },
+    {
+        "id": 7,
+        "title": "1 bedroom apartment in City Center Nicosia",
+        "type": "Apartment",
+        "location": "Nicosia",
+        "bedrooms": 1,
+        "price": 185000,
+        "price_label": "EUR185,000",
+        "blurb": "Compact modern apartment aimed at professionals and investors who want strong city convenience.",
+        "tags": ["City center", "Investment", "Modern finish"],
+    },
+    {
+        "id": 8,
+        "title": "3 bedroom maisonette in Dasoupoli",
+        "type": "Maisonette",
+        "location": "Dasoupoli",
+        "bedrooms": 3,
+        "price": 340000,
+        "price_label": "EUR340,000",
+        "blurb": "Smartly renovated maisonette with practical family layout and quick access to business districts.",
+        "tags": ["Renovated", "Family layout", "Central access"],
+    },
+    {
+        "id": 9,
+        "title": "2 bedroom seafront apartment in Limassol",
+        "type": "Apartment",
+        "location": "Limassol",
+        "bedrooms": 2,
+        "price": 540000,
+        "price_label": "EUR540,000",
+        "blurb": "Seafront apartment with premium finishes and strong appeal for lifestyle buyers or holiday use.",
+        "tags": ["Seafront", "Premium", "Holiday home"],
+    },
+    {
+        "id": 10,
+        "title": "5 bedroom villa in Germasogeia",
+        "type": "Villa",
+        "location": "Germasogeia",
+        "bedrooms": 5,
+        "price": 1450000,
+        "price_label": "EUR1.45M",
+        "blurb": "High-end hillside villa with expansive terraces, private pool, and elevated Limassol views.",
+        "tags": ["Hillside", "Private pool", "Prestige"],
+    },
 ]
 
 VIEWING_SLOTS = [
@@ -98,6 +142,24 @@ INITIAL_PROFILE = {
     "viewing_booked": None,
 }
 
+RECOMMENDATION_INTROS = [
+    "Here are the closest matches I would suggest based on what you have shared:",
+    "These are the strongest options I would shortlist for you right now:",
+    "From the current brief, these listings look the most relevant:",
+]
+
+PROPERTY_INTROS = [
+    "Based on your brief, these are the properties I would put forward first:",
+    "From what you have told me, I would start with these homes:",
+    "At this stage, these look like the best-fit properties to review first:",
+]
+
+FALLBACK_INTROS = [
+    "I can help with search, comparisons, or a viewing arrangement.",
+    "I can narrow this down quickly and keep it practical.",
+    "I can help you move from browsing to a realistic shortlist.",
+]
+
 WELCOME_MESSAGE = (
     "Welcome to **M.Residence**. I can help you explore homes in Cyprus, narrow down the right fit, "
     "and line up a viewing.\n\n"
@@ -110,6 +172,10 @@ def init_state() -> None:
         st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
     if "lead_profile" not in st.session_state:
         st.session_state.lead_profile = deepcopy(INITIAL_PROFILE)
+    if "shown_listing_ids" not in st.session_state:
+        st.session_state.shown_listing_ids = []
+    if "response_counters" not in st.session_state:
+        st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
 
 
 def inject_styles() -> None:
@@ -249,6 +315,8 @@ def parse_preferences(message: str) -> None:
         "aglantzia",
         "archangelos",
         "nicosia",
+        "dasoupoli",
+        "germasogeia",
     ]
     found_location = next((value for value in known_locations if value in normalized), None)
     if found_location:
@@ -296,12 +364,24 @@ def get_listing_score(listing: dict) -> int:
     return score
 
 
-def get_recommendations() -> list[dict]:
+def get_recommendations(prefer_fresh: bool = True) -> list[dict]:
     scored = sorted(
         LISTINGS,
         key=lambda listing: (-get_listing_score(listing), listing["price"]),
     )
-    return scored[:3]
+
+    if not prefer_fresh:
+        picks = scored[:3]
+    else:
+        unseen = [listing for listing in scored if listing["id"] not in st.session_state.shown_listing_ids]
+        seen = [listing for listing in scored if listing["id"] in st.session_state.shown_listing_ids]
+        picks = (unseen + seen)[:3]
+
+    for listing in picks:
+        if listing["id"] not in st.session_state.shown_listing_ids:
+            st.session_state.shown_listing_ids.append(listing["id"])
+
+    return picks
 
 
 def get_missing_qualifiers() -> list[str]:
@@ -324,6 +404,13 @@ def render_recommendations(matches: list[dict]) -> str:
             f"  {listing['bedrooms']} bedrooms | {listing['location']} | {listing['blurb']}"
         )
     return "\n".join(lines)
+
+
+def next_phrase(kind: str, options: list[str]) -> str:
+    counters = st.session_state.response_counters
+    index = counters[kind] % len(options)
+    counters[kind] += 1
+    return options[index]
 
 
 def mentions_booking(normalized: str) -> bool:
@@ -359,7 +446,7 @@ def build_fallback() -> str:
         prompt = "I already have enough to start matching options."
 
     return (
-        "I can help with search, comparisons, or a viewing arrangement.\n\n"
+        f"{next_phrase('fallback', FALLBACK_INTROS)}\n\n"
         f"{prompt}\n\n"
         "For example: **I want a 3 bedroom house in Lakatamia around EUR400,000 and I would like to move within 3 months.**"
     )
@@ -378,7 +465,7 @@ def generate_reply(message: str) -> str:
         )
 
     if mentions_booking(normalized):
-        shortlist = get_recommendations()
+        shortlist = get_recommendations(prefer_fresh=False)
         if shortlist:
             profile["selected_listing"] = shortlist[0]["title"]
             lead_line = (
@@ -398,7 +485,7 @@ def generate_reply(message: str) -> str:
         if matches:
             profile["selected_listing"] = matches[0]["title"]
             return (
-                "Here are the closest matches I would suggest based on what you have shared:\n\n"
+                f"{next_phrase('recommend', RECOMMENDATION_INTROS)}\n\n"
                 f"{render_recommendations(matches)}\n\n"
                 "The first option is the strongest fit, and the next two give you strong alternatives on price or location."
             )
@@ -415,7 +502,7 @@ def generate_reply(message: str) -> str:
         if matches:
             profile["selected_listing"] = matches[0]["title"]
             return (
-                "Based on your brief, these are the properties I would put forward first:\n\n"
+                f"{next_phrase('property', PROPERTY_INTROS)}\n\n"
                 f"{render_recommendations(matches)}\n\n"
                 f"{follow_up}"
             )
@@ -427,6 +514,8 @@ def generate_reply(message: str) -> str:
 def reset_chat() -> None:
     st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
     st.session_state.lead_profile = deepcopy(INITIAL_PROFILE)
+    st.session_state.shown_listing_ids = []
+    st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
 
 
 def submit_prompt(prompt: str) -> None:
