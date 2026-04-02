@@ -1,5 +1,7 @@
 import re
+import time
 from copy import deepcopy
+from datetime import datetime
 
 import streamlit as st
 
@@ -161,6 +163,12 @@ FALLBACK_INTROS = [
     "I can help you move from browsing to a realistic shortlist.",
 ]
 
+QUALIFYING_INTROS = [
+    "I can narrow this down properly for you.",
+    "Let me tighten the search before I suggest specific homes.",
+    "I want to make the shortlist feel relevant, not random.",
+]
+
 WELCOME_MESSAGE = (
     "Welcome to **M.Residence**. I can help you explore homes in Cyprus, narrow down the right fit, "
     "and line up a viewing.\n\n"
@@ -170,7 +178,9 @@ WELCOME_MESSAGE = (
 
 def init_state() -> None:
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
+        st.session_state.messages = [
+            {"role": "assistant", "content": WELCOME_MESSAGE, "time": current_time_label()}
+        ]
     if "lead_profile" not in st.session_state:
         st.session_state.lead_profile = deepcopy(INITIAL_PROFILE)
     if "shown_listing_ids" not in st.session_state:
@@ -179,6 +189,8 @@ def init_state() -> None:
         st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
     if "asked_fields" not in st.session_state:
         st.session_state.asked_fields = []
+    if "pending_reply" not in st.session_state:
+        st.session_state.pending_reply = None
 
 
 def inject_styles() -> None:
@@ -281,10 +293,131 @@ def inject_styles() -> None:
             font-weight: 700;
             margin: 8px 8px 0 0;
         }
+        .wa-shell {
+            background: #efeae2;
+            border: 1px solid rgba(31, 41, 51, 0.08);
+            border-radius: 24px;
+            overflow: hidden;
+        }
+        .wa-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 16px;
+            background: #f0f2f5;
+            border-bottom: 1px solid rgba(31, 41, 51, 0.08);
+        }
+        .wa-agent {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .wa-avatar {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #c97f35, #8f5421);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.95rem;
+            font-weight: 800;
+        }
+        .wa-name {
+            font-weight: 800;
+            color: #111b21;
+        }
+        .wa-status {
+            font-size: 0.84rem;
+            color: #667781;
+        }
+        .wa-thread {
+            padding: 18px 16px;
+            background:
+                radial-gradient(circle at top left, rgba(255,255,255,0.28), transparent 18%),
+                linear-gradient(rgba(255,255,255,0.18), rgba(255,255,255,0.18)),
+                #e5ddd5;
+            min-height: 520px;
+        }
+        .wa-row {
+            display: flex;
+            margin-bottom: 12px;
+        }
+        .wa-row.user {
+            justify-content: flex-end;
+        }
+        .wa-row.assistant {
+            justify-content: flex-start;
+        }
+        .wa-bubble {
+            max-width: 78%;
+            padding: 10px 12px 18px;
+            border-radius: 12px;
+            position: relative;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            box-shadow: 0 1px 1px rgba(17, 27, 33, 0.08);
+            white-space: pre-wrap;
+        }
+        .wa-row.assistant .wa-bubble {
+            background: white;
+            color: #111b21;
+            border-top-left-radius: 4px;
+        }
+        .wa-row.user .wa-bubble {
+            background: #d9fdd3;
+            color: #111b21;
+            border-top-right-radius: 4px;
+        }
+        .wa-time {
+            position: absolute;
+            right: 10px;
+            bottom: 5px;
+            font-size: 0.72rem;
+            color: #667781;
+        }
+        .wa-typing {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            background: white;
+            color: #667781;
+            font-size: 0.9rem;
+            box-shadow: 0 1px 1px rgba(17, 27, 33, 0.08);
+        }
+        .wa-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #8696a0;
+            animation: wa-bounce 1.2s infinite ease-in-out;
+        }
+        .wa-dot:nth-child(2) {
+            animation-delay: 0.15s;
+        }
+        .wa-dot:nth-child(3) {
+            animation-delay: 0.3s;
+        }
+        @keyframes wa-bounce {
+            0%, 80%, 100% { transform: translateY(0); opacity: 0.55; }
+            40% { transform: translateY(-4px); opacity: 1; }
+        }
+        .wa-actions {
+            padding: 12px 16px 2px;
+            background: #f0f2f5;
+            border-top: 1px solid rgba(31, 41, 51, 0.08);
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def current_time_label() -> str:
+    return datetime.now().strftime("%H:%M")
 
 
 def parse_preferences(message: str) -> list[str]:
@@ -415,6 +548,15 @@ def get_recommendations(prefer_fresh: bool = True) -> list[dict]:
     return picks
 
 
+def profile_strength() -> int:
+    profile = st.session_state.lead_profile
+    score = 0
+    for field in ["budget", "location", "bedrooms", "purpose", "timeline", "intent"]:
+        if profile.get(field):
+            score += 1
+    return score
+
+
 def get_missing_qualifiers() -> list[str]:
     profile = st.session_state.lead_profile
     missing = []
@@ -429,10 +571,18 @@ def get_missing_qualifiers() -> list[str]:
 
 def render_recommendations(matches: list[dict]) -> str:
     lines = []
-    for listing in matches:
+    for index, listing in enumerate(matches, start=1):
+        lead_note = ""
+        if index == 1:
+            lead_note = "Best fit right now"
+        elif index == 2:
+            lead_note = "Strong alternative"
+        else:
+            lead_note = "Worth comparing"
         lines.append(
-            f"- **{listing['title']}** | {listing['price_label']}\n"
-            f"  {listing['bedrooms']} bedrooms | {listing['location']} | {listing['blurb']}"
+            f"**{index}. {listing['title']}**\n"
+            f"{lead_note} | {listing['price_label']} | {listing['bedrooms']} bedrooms | {listing['location']}\n"
+            f"{listing['blurb']}"
         )
     return "\n".join(lines)
 
@@ -541,6 +691,13 @@ def build_fallback() -> str:
     return f"{next_phrase('fallback', FALLBACK_INTROS)}\n\n{body}"
 
 
+def build_qualifying_reply(acknowledgment: str = "") -> str:
+    _, next_question = get_next_question()
+    prompt = next_question or "Share your budget, preferred area, and ideal bedroom count, and I will suggest the most relevant options."
+    parts = [acknowledgment, next_phrase("fallback", QUALIFYING_INTROS), prompt]
+    return "\n\n".join(part for part in parts if part)
+
+
 def generate_reply(message: str) -> str:
     profile = st.session_state.lead_profile
     normalized = message.lower()
@@ -555,6 +712,14 @@ def generate_reply(message: str) -> str:
         )
 
     if mentions_booking(normalized):
+        if profile_strength() < 3:
+            parts = [
+                acknowledgment,
+                "I can absolutely help arrange that.",
+                "Before I suggest the best slot and property, I just need one or two details so I do not book you against the wrong type of home.",
+                get_next_question()[1] or "What budget and area should I work with?",
+            ]
+            return "\n\n".join(part for part in parts if part)
         shortlist = get_recommendations(prefer_fresh=False)
         if shortlist:
             profile["selected_listing"] = shortlist[0]["title"]
@@ -573,6 +738,8 @@ def generate_reply(message: str) -> str:
         return "\n\n".join(part for part in parts if part)
 
     if asks_for_similar(normalized) or asks_for_recommendations(normalized):
+        if profile_strength() < 3:
+            return build_qualifying_reply(acknowledgment)
         matches = get_recommendations()
         if matches:
             profile["selected_listing"] = matches[0]["title"]
@@ -592,12 +759,14 @@ def generate_reply(message: str) -> str:
         return build_fallback()
 
     if asks_about_properties(normalized) or profile["location"] or profile["budget"] or profile["bedrooms"]:
+        if profile_strength() < 3:
+            return build_qualifying_reply(acknowledgment)
         matches = get_recommendations()
         _, next_question = get_next_question()
         if next_question:
             follow_up = next_question
         elif should_offer_booking():
-            follow_up = "Would you like me to line up a viewing or show you a couple of comparable alternatives in the same bracket?"
+            follow_up = "If you would like, I can now line up a viewing or show you two comparable options in the same bracket."
         else:
             follow_up = "If you want, give me one more detail and I will tighten the shortlist further."
         if matches:
@@ -616,17 +785,79 @@ def generate_reply(message: str) -> str:
 
 
 def reset_chat() -> None:
-    st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
+    st.session_state.messages = [
+        {"role": "assistant", "content": WELCOME_MESSAGE, "time": current_time_label()}
+    ]
     st.session_state.lead_profile = deepcopy(INITIAL_PROFILE)
     st.session_state.shown_listing_ids = []
     st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
     st.session_state.asked_fields = []
+    st.session_state.pending_reply = None
 
 
 def submit_prompt(prompt: str) -> None:
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    reply = generate_reply(prompt)
-    st.session_state.messages.append({"role": "assistant", "content": reply})
+    st.session_state.messages.append({"role": "user", "content": prompt, "time": current_time_label()})
+    st.session_state.pending_reply = generate_reply(prompt)
+
+
+def flush_pending_reply() -> None:
+    if st.session_state.pending_reply:
+        time.sleep(0.55)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": st.session_state.pending_reply, "time": current_time_label()}
+        )
+        st.session_state.pending_reply = None
+
+
+def render_chat_thread() -> None:
+    st.markdown(
+        """
+        <div class="wa-shell">
+          <div class="wa-header">
+            <div class="wa-agent">
+              <div class="wa-avatar">MR</div>
+              <div>
+                <div class="wa-name">M.Residence Concierge</div>
+                <div class="wa-status">online now</div>
+              </div>
+            </div>
+            <div class="wa-status">WhatsApp-style demo</div>
+          </div>
+          <div class="wa-thread">
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for message in st.session_state.messages:
+        role = message["role"]
+        content = message["content"].replace("\n", "<br>")
+        st.markdown(
+            f"""
+            <div class="wa-row {role}">
+              <div class="wa-bubble">
+                {content}
+                <span class="wa-time">{message.get("time", "")}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if st.session_state.pending_reply:
+        st.markdown(
+            """
+            <div class="wa-row assistant">
+              <div class="wa-typing">
+                <span class="wa-dot"></span>
+                <span class="wa-dot"></span>
+                <span class="wa-dot"></span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_featured_listings() -> None:
@@ -701,7 +932,7 @@ with left_col:
 with right_col:
     st.markdown("<div class='panel'>", unsafe_allow_html=True)
     st.markdown("### M.Residence Concierge")
-    st.caption("Friendly, professional, slightly conversational. No login required.")
+    st.caption("WhatsApp-style demo chat with simulated live responses.")
 
     quick_prompts = [
         "I'm looking for an apartment in Strovolos around EUR260,000.",
@@ -713,15 +944,15 @@ with right_col:
     for index, prompt in enumerate(quick_prompts):
         if quick_cols[index].button(prompt.split(".")[0], use_container_width=True):
             submit_prompt(prompt)
+            flush_pending_reply()
             st.rerun()
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    render_chat_thread()
 
     user_prompt = st.chat_input("Ask about homes, budget, areas, or book a viewing...")
     if user_prompt:
         submit_prompt(user_prompt)
+        flush_pending_reply()
         st.rerun()
 
     if st.button("Reset conversation", use_container_width=True):
