@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>M.Residence AI Property Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero-panel">
+      <div class="hero-copy">
+        <p class="eyebrow">M.Residence Cyprus</p>
+        <h1>AI real estate assistant for high-conversion property demos.</h1>
+        <p class="hero-text">
+          A friendly, professional chatbot that qualifies leads, recommends matching homes,
+          and smoothly moves buyers toward booking a viewing.
+        </p>
+      </div>
+
+      <div class="featured-listings" id="featuredListings"></div>
+    </section>
+
+    <section class="chat-panel">
+      <header class="chat-header">
+        <div>
+          <p class="agent-kicker">Live assistant</p>
+          <h2>M.Residence Concierge</h2>
+        </div>
+        <div class="agent-badge">
+          <span class="status-dot"></span>
+          Online now
+        </div>
+      </header>
+
+      <div class="quick-actions">
+        <button class="quick-action" data-prompt="I'm looking for an apartment in Strovolos around EUR260,000.">
+          Find apartments
+        </button>
+        <button class="quick-action" data-prompt="Show me family homes in Nicosia with 3 bedrooms.">
+          Family homes
+        </button>
+        <button class="quick-action" data-prompt="I want to book a viewing this week.">
+          Book a viewing
+        </button>
+      </div>
+
+      <div class="chat-thread" id="chatThread" aria-live="polite"></div>
+
+      <form class="chat-input-row" id="chatForm">
+        <input
+          id="chatInput"
+          type="text"
+          placeholder="Ask about homes, budget, areas, or book a viewing..."
+          autocomplete="off"
+        >
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <template id="messageTemplate">
+    <article class="message">
+      <div class="bubble"></div>
+    </article>
+  </template>
+
+  <script src="script.js"></script>
+</body>
+</html>
