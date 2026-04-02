@@ -499,12 +499,25 @@ def parse_preferences(message: str) -> list[str]:
     if budget_match:
         raw = float(budget_match.group(1).replace(",", "."))
         suffix = budget_match.group(2)
+        budget_keywords = ["budget", "around", "up to", "maximum", "max", "price range"]
         has_currency_cue = "eur" in normalized or suffix is not None
+        has_budget_context = any(keyword in normalized for keyword in budget_keywords)
+        number_token = budget_match.group(1)
+        looks_like_phone_number = (
+            suffix is None
+            and "." not in number_token
+            and "," not in number_token
+            and len(re.sub(r"\D", "", number_token)) >= 8
+            and not has_currency_cue
+            and not has_budget_context
+        )
         if suffix in {"m", "million"}:
             budget = round(raw * 1_000_000)
         elif suffix == "k":
             budget = round(raw * 1_000)
-        elif has_currency_cue or raw >= 50000:
+        elif looks_like_phone_number:
+            budget = None
+        elif has_currency_cue or has_budget_context or raw >= 50000:
             budget = round(raw)
         else:
             budget = None
@@ -534,7 +547,24 @@ def parse_preferences(message: str) -> list[str]:
     found_location = next((value for value in known_locations if value in normalized), None)
     if found_location:
         location = found_location.capitalize()
-        if profile["location"] != location:
+        location_change_cues = [
+            "change to",
+            "switch to",
+            "instead",
+            "rather",
+            "prefer",
+            "focus on",
+            "move to",
+            "search in",
+            "look in",
+            "actually",
+        ]
+        can_update_location = (
+            profile["location"] is None
+            or profile["location"] == location
+            or any(cue in normalized for cue in location_change_cues)
+        )
+        if can_update_location and profile["location"] != location:
             profile["location"] = location
             updated_fields.append("location")
 
