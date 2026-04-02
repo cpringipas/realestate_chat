@@ -138,6 +138,7 @@ INITIAL_PROFILE = {
     "timeline": None,
     "bedrooms": None,
     "purpose": None,
+    "intent": None,
     "selected_listing": None,
     "viewing_booked": None,
 }
@@ -176,6 +177,8 @@ def init_state() -> None:
         st.session_state.shown_listing_ids = []
     if "response_counters" not in st.session_state:
         st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
+    if "asked_fields" not in st.session_state:
+        st.session_state.asked_fields = []
 
 
 def inject_styles() -> None:
@@ -284,9 +287,10 @@ def inject_styles() -> None:
     )
 
 
-def parse_preferences(message: str) -> None:
+def parse_preferences(message: str) -> list[str]:
     profile = st.session_state.lead_profile
     normalized = message.lower()
+    updated_fields = []
 
     budget_match = re.search(r"(?:eur)?\s?(\d+(?:[\.,]\d+)?)\s?(k|m|million)?", normalized)
     if budget_match:
@@ -301,11 +305,16 @@ def parse_preferences(message: str) -> None:
         else:
             budget = round(raw)
         if budget >= 50_000:
-            profile["budget"] = budget
+            if profile["budget"] != budget:
+                profile["budget"] = budget
+                updated_fields.append("budget")
 
     bedroom_match = re.search(r"(\d)\s*bed", normalized)
     if bedroom_match:
-        profile["bedrooms"] = int(bedroom_match.group(1))
+        bedrooms = int(bedroom_match.group(1))
+        if profile["bedrooms"] != bedrooms:
+            profile["bedrooms"] = bedrooms
+            updated_fields.append("bedrooms")
 
     known_locations = [
         "strovolos",
@@ -320,19 +329,41 @@ def parse_preferences(message: str) -> None:
     ]
     found_location = next((value for value in known_locations if value in normalized), None)
     if found_location:
-        profile["location"] = found_location.capitalize()
+        location = found_location.capitalize()
+        if profile["location"] != location:
+            profile["location"] = location
+            updated_fields.append("location")
 
     if "apartment" in normalized:
-        profile["purpose"] = "Apartment"
+        if profile["purpose"] != "Apartment":
+            profile["purpose"] = "Apartment"
+            updated_fields.append("purpose")
     elif "house" in normalized or "home" in normalized:
-        profile["purpose"] = "House"
+        if profile["purpose"] != "House":
+            profile["purpose"] = "House"
+            updated_fields.append("purpose")
     elif "villa" in normalized:
-        profile["purpose"] = "Villa"
+        if profile["purpose"] != "Villa":
+            profile["purpose"] = "Villa"
+            updated_fields.append("purpose")
 
     timeline_signals = ["this month", "next month", "asap", "soon", "3 months", "six months", "investment"]
     found_timeline = next((value for value in timeline_signals if value in normalized), None)
     if found_timeline:
-        profile["timeline"] = found_timeline
+        if profile["timeline"] != found_timeline:
+            profile["timeline"] = found_timeline
+            updated_fields.append("timeline")
+
+    if any(term in normalized for term in ["invest", "rental yield", "return", "investment"]):
+        if profile["intent"] != "Investment":
+            profile["intent"] = "Investment"
+            updated_fields.append("intent")
+    elif any(term in normalized for term in ["family", "live in", "move in", "home for us", "primary residence"]):
+        if profile["intent"] != "Primary residence":
+            profile["intent"] = "Primary residence"
+            updated_fields.append("intent")
+
+    return updated_fields
 
 
 def get_listing_score(listing: dict) -> int:
@@ -406,6 +437,72 @@ def render_recommendations(matches: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def get_next_question() -> tuple[str | None, str | None]:
+    profile = st.session_state.lead_profile
+    candidates = [
+        (
+            "budget",
+            "What budget range would you like me to stay within?",
+        ),
+        (
+            "location",
+            "Which area should I focus on first, such as Strovolos, Lakatamia, Engomi, Limassol, or Germasogeia?",
+        ),
+        (
+            "timeline",
+            "How soon are you hoping to buy or arrange a viewing?",
+        ),
+        (
+            "bedrooms",
+            "How many bedrooms would feel right for you?",
+        ),
+        (
+            "intent",
+            "Is this mainly for your own use or more of an investment purchase?",
+        ),
+    ]
+
+    for field, question in candidates:
+        needs_value = field == "location" and not profile["location"]
+        needs_value = needs_value or (field != "location" and not profile.get(field))
+        if needs_value and field not in st.session_state.asked_fields:
+            st.session_state.asked_fields.append(field)
+            return field, question
+    return None, None
+
+
+def summarize_updates(updated_fields: list[str]) -> str:
+    profile = st.session_state.lead_profile
+    labels = []
+    for field in updated_fields:
+        if field == "budget" and profile["budget"]:
+            labels.append(f"budget around EUR{profile['budget']:,}")
+        elif field == "location" and profile["location"]:
+            labels.append(f"focus on {profile['location']}")
+        elif field == "timeline" and profile["timeline"]:
+            labels.append(f"timeline {profile['timeline']}")
+        elif field == "bedrooms" and profile["bedrooms"]:
+            labels.append(f"{profile['bedrooms']} bedrooms")
+        elif field == "purpose" and profile["purpose"]:
+            labels.append(profile["purpose"].lower())
+        elif field == "intent" and profile["intent"]:
+            labels.append(profile["intent"].lower())
+
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return f"Understood, I have noted {labels[0]}."
+    return "Understood, I have noted " + ", ".join(labels[:-1]) + f", and {labels[-1]}."
+
+
+def should_offer_booking() -> bool:
+    profile = st.session_state.lead_profile
+    populated = sum(
+        1 for key in ["budget", "location", "timeline", "bedrooms", "purpose", "intent"] if profile.get(key)
+    )
+    return populated >= 3
+
+
 def next_phrase(kind: str, options: list[str]) -> str:
     counters = st.session_state.response_counters
     index = counters[kind] % len(options)
@@ -439,23 +536,16 @@ def try_book_specific_slot(normalized: str) -> bool:
 
 
 def build_fallback() -> str:
-    missing = get_missing_qualifiers()
-    if missing:
-        prompt = f"A quick way for me to narrow it down is your {', '.join(missing[:3])}."
-    else:
-        prompt = "I already have enough to start matching options."
-
-    return (
-        f"{next_phrase('fallback', FALLBACK_INTROS)}\n\n"
-        f"{prompt}\n\n"
-        "For example: **I want a 3 bedroom house in Lakatamia around EUR400,000 and I would like to move within 3 months.**"
-    )
+    _, next_question = get_next_question()
+    body = next_question or "If you want, I can now narrow this to a tighter shortlist or move straight to viewing times."
+    return f"{next_phrase('fallback', FALLBACK_INTROS)}\n\n{body}"
 
 
 def generate_reply(message: str) -> str:
     profile = st.session_state.lead_profile
     normalized = message.lower()
-    parse_preferences(message)
+    updated_fields = parse_preferences(message)
+    acknowledgment = summarize_updates(updated_fields)
 
     if try_book_specific_slot(normalized):
         selected = profile["selected_listing"] or "the shortlisted property"
@@ -474,41 +564,55 @@ def generate_reply(message: str) -> str:
         else:
             lead_line = "I can arrange that for you."
         slots = ", ".join(VIEWING_SLOTS)
-        return (
+        parts = [
+            acknowledgment,
             f"Absolutely. {lead_line}\n\n"
             f"Here are a few viewing times available this week: **{slots}**.\n\n"
             "Reply with the time that works best and I will confirm it for you."
-        )
+        ]
+        return "\n\n".join(part for part in parts if part)
 
     if asks_for_similar(normalized) or asks_for_recommendations(normalized):
         matches = get_recommendations()
         if matches:
             profile["selected_listing"] = matches[0]["title"]
-            return (
+            closing = (
+                "If one stands out, I can line up a viewing and give you two comparables for context."
+                if should_offer_booking()
+                else get_next_question()[1] or "If you want, I can refine this further by area, budget, or timing."
+            )
+            parts = [
+                acknowledgment,
                 f"{next_phrase('recommend', RECOMMENDATION_INTROS)}\n\n"
                 f"{render_recommendations(matches)}\n\n"
-                "The first option is the strongest fit, and the next two give you strong alternatives on price or location."
-            )
+                "The first option is the strongest fit, and the next two give you strong alternatives on price or location.",
+                closing,
+            ]
+            return "\n\n".join(part for part in parts if part)
         return build_fallback()
 
     if asks_about_properties(normalized) or profile["location"] or profile["budget"] or profile["bedrooms"]:
         matches = get_recommendations()
-        missing = get_missing_qualifiers()
-        follow_up = (
-            f"To refine this properly, could you also share your {' and '.join(missing[:2])}?"
-            if missing
-            else "Would you like me to line up a viewing or show you a couple of comparable alternatives in the same bracket?"
-        )
+        _, next_question = get_next_question()
+        if next_question:
+            follow_up = next_question
+        elif should_offer_booking():
+            follow_up = "Would you like me to line up a viewing or show you a couple of comparable alternatives in the same bracket?"
+        else:
+            follow_up = "If you want, give me one more detail and I will tighten the shortlist further."
         if matches:
             profile["selected_listing"] = matches[0]["title"]
-            return (
+            parts = [
+                acknowledgment,
                 f"{next_phrase('property', PROPERTY_INTROS)}\n\n"
                 f"{render_recommendations(matches)}\n\n"
-                f"{follow_up}"
-            )
+                f"{follow_up}",
+            ]
+            return "\n\n".join(part for part in parts if part)
         return build_fallback()
 
-    return build_fallback()
+    fallback = build_fallback()
+    return "\n\n".join(part for part in [acknowledgment, fallback] if part)
 
 
 def reset_chat() -> None:
@@ -516,6 +620,7 @@ def reset_chat() -> None:
     st.session_state.lead_profile = deepcopy(INITIAL_PROFILE)
     st.session_state.shown_listing_ids = []
     st.session_state.response_counters = {"recommend": 0, "property": 0, "fallback": 0}
+    st.session_state.asked_fields = []
 
 
 def submit_prompt(prompt: str) -> None:
@@ -547,6 +652,7 @@ def render_profile() -> None:
     location = profile["location"] or "Not captured yet"
     timeline = profile["timeline"] or "Not captured yet"
     bedrooms = str(profile["bedrooms"]) if profile["bedrooms"] else "Flexible"
+    intent = profile["intent"] or "Not captured yet"
     selected = profile["selected_listing"] or "No current lead property"
     viewing = profile["viewing_booked"] or "No viewing booked"
 
@@ -556,6 +662,7 @@ def render_profile() -> None:
     st.markdown(f"**Location:** {location}")
     st.markdown(f"**Timeline:** {timeline}")
     st.markdown(f"**Bedrooms:** {bedrooms}")
+    st.markdown(f"**Use case:** {intent}")
     st.markdown(f"**Current best match:** {selected}")
     st.markdown(f"**Viewing status:** {viewing}")
     st.markdown("</div>", unsafe_allow_html=True)
